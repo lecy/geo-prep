@@ -1,0 +1,589 @@
+---
+title: "Calculate Distances"
+output:
+  html_document:
+    theme: united
+    df_print: paged
+    highlight: tango
+    smart: false
+    toc: yes
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=F, message=F, fig.width=10)
+```
+
+```{r}
+library( dplyr )
+library( tidyr )
+library( pander )
+library( geosphere )
+```
+
+
+# Load Geocoded Data
+
+NPOS currently are missing 2018 - check on this! 
+
+```{r}
+npos <- readRDS( "data-geo/NPOS-GEOCODES-COMPILED.rds" )
+npos <- filter( npos, match == "Match" )
+npos$EIN <- substr( npos$id, 9, 17 )
+head( npos ) # %>% pander()
+
+peeps <- readRDS( "data-geo/PEOPLE-GEOCODES-COMPILED.rds" )
+peeps <- filter( peeps, match == "Match" )
+peeps$EIN <- substr( peeps$id, 9, 17 )
+head( peeps ) # %>% pander()
+```
+
+
+Number of matches with both NPO and Board locations:
+
+```{r}
+sum( peeps$EIN %in% npos$EIN )
+```
+
+
+
+# Distance between points
+
+```{r}
+# library(geosphere)
+
+# distm returns a vector of distances in meters
+dat.temp <- head( peeps, 4 )[c("lon","lat")]
+rownames( dat.temp ) <- head( peeps, 4 )$id
+distm( dat.temp, fun = distGeo ) # in meters
+
+# in miles
+distm( dat.temp, fun = distGeo ) * 0.001 * 0.621371
+
+d.mat <- distm( dat.temp, fun = distGeo ) * 0.001 * 0.621371  # convert m to miles
+d.vec <- d.mat[ lower.tri( d.mat ) ]
+mean( d.vec )
+
+id <- head( peeps, 4 )$id
+rownames( d.mat ) <- id
+colnames( d.mat ) <- id
+as.data.frame( as.table( d.mat ) )
+```
+
+
+
+
+
+
+
+# Create dist data frame
+
+
+
+```{r}
+peeps$EIN <- substr( peeps$id, 9, 17 )
+dat <- select( peeps, id, EIN, lat, lon )
+dat <- na.omit( dat )
+table( table( dat$EIN ) )
+```
+
+
+```{r}
+peeps <- 
+  peeps %>%
+  group_by( EIN ) %>%
+  mutate( n=n() ) %>%
+  ungroup()
+# p2 <- filter( peeps, n > 1 )
+```
+
+
+
+```{r}
+# p2 <- peeps 
+# peeps <- peeps[1:100,]
+
+gen_pairs <- function( dat )
+{
+  dist <- NULL
+  # ave.dist <- NULL
+  
+  for( i in unique(dat$EIN) )
+  {
+    # print( i )
+    sub.dat <- dat[ dat$EIN == i , ]
+    
+    if( sum( sub.dat$n ) > 1 )
+    { 
+      coords <- sub.dat[c("lon","lat")] 
+      d.mat <- distm( coords, fun = distGeo ) 
+      d.mat <- d.mat * 0.001 * 0.621371  # convert m to miles
+      d.vec <- d.mat[ lower.tri( d.mat ) ]
+      ave.dist <- bind_rows( ave.dist, data.frame( ein=i, ave.dist=mean( d.vec ) ) )
+      
+      id <- sub.dat$id
+      rownames( d.mat ) <- id
+      colnames( d.mat ) <- id
+      pairs <- as.data.frame( as.table( d.mat ) )
+      pairs <- pairs[ as.vector(lower.tri(d.mat)) , ]
+      dist <- bind_rows( dist, pairs )
+    }
+  }
+  
+  return( dist )
+}
+```
+
+
+
+```{r}
+p2 <- peeps[ 1:100 , ]
+
+start_time <- Sys.time()
+dist <- gen_pairs( peeps )
+end_time <- Sys.time()
+
+end_time - start_time
+
+names( dist ) <- c("ID1","ID2","dist")
+dist$EIN <- substr( dist$ID1, 9, 17 )
+table( table( dist$EIN ) )
+
+# saveRDS( dist, "officer-to-officer-dist.rds" )
+```
+
+
+```{r}
+# dist <- readRDS( "data-prepped/officer-to-officer-dist.rds")
+
+ave.dist <-
+  dist %>%
+  group_by( EIN ) %>%
+  summarize( ave.dist = mean( dist ), 
+             min.dist = min( dist ),
+             max.dist = max( dist ), 
+             num.peeps = n() ) %>%
+  ungroup()
+
+# saveRDS( ave.dist, "data-prepped/ave-dist-btwn-officers.rds" )
+```
+
+
+```{r}
+# library( ggplot2 )
+
+ave.d <- ave.dist$ave.dist 
+
+ad <- ave.dist[ ave.dist$ave.dist < 5 , ]
+ggplot( ad, aes( x=ave.dist, fill="steelblue" ) ) +
+  geom_density()
+
+ad <- ave.dist[ ave.dist$ave.dist < 25 & ave.dist$ave.dist > 0, ]
+hist( ad$ave.dist, breaks=100, col="gray", border="white",
+      xlim=c(0,25) )
+```
+
+
+
+
+
+
+### Dist between nonprofits and board members
+
+```{r}
+# Calculate distance in kilometers between two points
+earth.dist <- function( long1, lat1, long2, lat2 )
+{
+  rad <- pi/180
+  a1 <- lat1 * rad
+  a2 <- long1 * rad
+  b1 <- lat2 * rad
+  b2 <- long2 * rad
+  dlon <- b2 - a2
+  dlat <- b1 - a1
+  a <- (sin(dlat/2))^2 + cos(a1) * cos(b1) * (sin(dlon/2))^2
+  c <- 2 * atan2(sqrt(a), sqrt(1 - a))
+  R <- 6378.145
+  d <- R * c
+  miles <- d * 0.621371  # convert km to miles
+  return(miles)
+}
+```
+
+```{r}
+lat1  <- peeps$lat[1]
+long1 <- peeps$lon[1]
+lat2  <- peeps$lat[2]
+long2 <- peeps$lon[2]
+
+earth.dist( long1, lat1, long2, lat2 )
+```
+
+
+
+```{r}
+lat1  <- peeps$lat[1]
+long1 <- peeps$lon[1]
+lat2  <- peeps$lat[2]
+long2 <- peeps$lon[2]
+
+earth.dist( long1=sub.dat$lon.npo, lat1=sub.dat$lat.npo, 
+            long2=sub.dat$lon, lat2=sub.dat$lat )
+```
+
+
+
+```{r}
+dist_to_npo <- function( dat.npos, dat.peeps  )
+{
+  npo.peeps.pairs <- list()
+  
+  for( i in 1:nrow(dat.npos) )
+  {
+    these <- dat.peeps$EIN == dat.npos$EIN[i]
+    if( sum(these) > 0 )
+    {
+      npo.lon.lat <- dat.npos[ i , c("id","lon","lat") ]
+      names( npo.lon.lat ) <- c("id.npo","lon.npo","lat.npo")
+      peeps.lon.lat <- 
+        dat.peeps[ dat.peeps$EIN == dat.npos$EIN[i] , c("id","lon","lat") ]
+      names( peeps.lon.lat ) <- c("id.peeps","lon.peeps","lat.peeps")
+      sub.dat <- cbind( npo.lon.lat, peeps.lon.lat )
+      npo.peeps.pairs[[i]] <- sub.dat      
+    }
+
+  }
+  
+  npo.peeps.pairs <- bind_rows( npo.peeps.pairs )
+  
+  npo.peeps.pairs$dist.to.npo <- 
+    earth.dist( long1=npo.peeps.pairs$lon.npo, 
+                lat1 =npo.peeps.pairs$lat.npo, 
+                long2=npo.peeps.pairs$lon.peeps, 
+                lat2 =npo.peeps.pairs$lat.peeps )
+  return( npo.peeps.pairs )
+}
+```
+
+
+```{r}
+# npos2 <- npos[ 1:1000 , ]
+start_time <- Sys.time()
+dist.npos <- dist_to_npo( npos, peeps )
+end_time <- Sys.time()
+end_time - start_time
+
+nrow( dist.npos )
+
+# saveRDS( dist.npos, "ave-dist-officers-to-npo.rds" )
+```
+
+
+```{r, eval=F}
+dist.npos <- readRDS( "data-prepped/ave-dist-officers-to-npo.rds" )
+```
+
+
+```{r}
+summary( dist.npos$dist.to.npo )
+```
+
+
+```{r}
+head( dist.npos )
+```
+
+
+
+
+
+```{r}
+# library( ggplot2 )
+ave.d.npo <-
+  dist.npos %>%
+  group_by( id.npo ) %>%
+  summarize( ave.dist.to.npo = mean( dist.to.npo ) ) %>%
+  ungroup()
+
+ave.d.np <- ave.d.npo$ave.dist.to.npo
+
+ad <- ave.dist[ ave.dist$ave.dist < 5 , ]
+ggplot( ad, aes( x=ave.dist, fill="steelblue" ) ) +
+  geom_density()
+
+mean( ave.d.np == 0 ) # 30% have distance of zero
+
+mean( ave.d.np < 10 ) # 77% are within 10 miles
+
+
+hist( ave.d.np[ ave.d.np < 10 & ave.d.np > 0  ], 
+      breaks=100, col="gray", border="white" )
+```
+
+
+
+```{r}
+groups <- cut( ave.d.np, breaks=seq( from=-0.5, to=25, by=0.5 ) )
+tb <- table( groups ) / length( ave.d.np )
+tb.cumul <- cumsum( tb )
+
+plot( seq( from=0, to=25, by=0.5 ), tb.cumul, 
+      type="b", pch=19, ylim=c(0,0.9), bty="n",
+      ylab="Cumulative Prop. of Nonprofits", xlab="Miles", 
+      main="Ave Distance of Nonprofit Officers to HQs" )
+abline( h=seq(0.1,1,0.1), lty=2, col="gray" )
+abline( v=seq(0,25,1), lty=2, col="gray" )
+points( seq( from=0, to=25, by=0.5 ), tb.cumul, type="b", pch=19 )
+```
+
+
+
+
+
+
+
+
+
+```{r}
+these <- as.numeric( c("003", "005", "007", "019", "051", "125", "129" ) )
+pitt.npos <- npos[ npos$state_fips == 42 & npos$county_fips == 3 , ]
+pitt.peeps <- peeps[ peeps$state_fips == 42 & peeps$county_fips == 3 , ]
+
+# plot( pitt$lon, pitt$lat )
+qmplot( lon, lat, data=pitt.npos, maptype="toner-lite", color=I("red") )
+
+qmplot( lon, lat, data=pitt.peeps, maptype="toner-lite", color=I("steelblue") )
+```
+
+
+
+
+
+```{r, fig.width=10, fig.height=10}
+pd <- dist.npos[ dist.npos$id.npo %in% unique( pitt.npos$id ) , ]
+
+max.x <- max( c(pd$lon.npo) )
+min.x <- min( c(pd$lon.npo) )
+max.y <- max( c(pd$lat.npo) )
+min.y <- min( c(pd$lat.npo) )
+
+# distance in miles from furthest points
+d.x <- earth.dist( long1=max.x, long2=min.x,lat1=40.66, lat2=40.66 )
+d.y <- earth.dist( long1=-79.71, long2=-79.70, lat1=min.y, lat2=max.y )
+
+# create a local board code for npos with board members in county only
+pd <- 
+  pd %>%
+  group_by( id.npo ) %>%
+  mutate( min.y.peeps = min( lat.peeps ),
+          max.y.peeps = max( lat.peeps ),
+          min.x.peeps = min( lon.peeps ),
+          max.x.peeps = max( lon.peeps ) ) %>%
+  mutate( LOCAL = min.y.peeps > min.y & max.y.peeps < max.y & 
+                min.x.peeps > min.x & max.x.peeps < max.x ) %>%
+  ungroup()
+
+
+dd <- pd[ pd$LOCAL , ]
+dd <- dd[ dd$id.npo %in% dd$id.npo[sample(1:nrow(dd),10)] , ]
+
+dd <- dd2
+# jitter board members to avoid overplot
+dd$lon.peeps <- dd$lon.peeps + rnorm(nrow(dd), 0, 0.005)
+dd$lat.peeps <- dd$lat.peeps + rnorm(nrow(dd), 0, 0.005) 
+
+dd3 <- unique( data.frame( lon.npo=dd$lon.npo, lat.npo=dd$lat.npo ) )
+plot( dd3$lon.npo, dd3$lat.npo, 
+      bty="n", pch=19, col=gray(0.5,0.5), cex=4,
+      xlim=c(min.x,max.x), ylim=c(min.y,max.y),
+      axes=FALSE, xlab="", ylab="" )
+segments( x0=dd$lon.npo, x1=dd$lon.peeps, y0=dd$lat.npo, y1=dd$lat.peeps,
+          col=gray(0.5,0.5) )
+points( dd$lon.peeps, dd$lat.peeps,pch=19, cex=2,
+        col=adjustcolor("firebrick",alpha.f=0.5) )
+axis( side=1, at=seq(from=min.x,to=max.x,length.out=10),
+      labels=c(0,rep("",8),paste(round(d.x,0),"Miles")), 
+      col="gray", col.axis="gray", cex=1.5)
+axis( side=2, at=seq(from=min.y,to=max.y,length.out=10),
+      labels=c(0,rep("",8),paste(round(d.y,0),"Miles")), 
+      col="gray", col.axis="gray", cex=1.5 )
+```
+
+
+
+
+```{r}
+dd <- pd[ pd$LOCAL , ]
+dd <- dd[ dd$id.npo %in% dd$id.npo[sample(1:nrow(dd),500)] , ]
+
+plot( dd$lon.npo, dd$lat.npo, 
+      bty="n", pch=19, col=gray(0.5,0.5), cex=0,
+      xlim=c(min.x,max.x), ylim=c(min.y,max.y),
+      axes=FALSE, xlab="", ylab="" )
+segments( x0=dd$lon.npo, x1=dd$lon.peeps, y0=dd$lat.npo, y1=dd$lat.peeps,
+          col=gray(0.5,0.5), lwd=1.5 )
+points( dd$lon.peeps, dd$lat.peeps, pch=19, col="firebrick", cex=0 )
+axis( side=1, at=seq(from=min.x,to=max.x,length.out=10),
+      labels=c(0,rep("",8),paste(round(d.x,0),"Miles")), 
+      col="gray", col.axis="gray", cex=1.5)
+axis( side=2, at=seq(from=min.y,to=max.y,length.out=10),
+      labels=c(0,rep("",8),paste(round(d.y,0),"Miles")), 
+      col="gray", col.axis="gray", cex=1.5 )
+```
+
+
+```{r, eval=F}
+dd2 <- 
+structure(list(id.npo = c("ID-2015-272357477", "ID-2015-272357477", 
+"ID-2015-272357477", "ID-2015-463279966", "ID-2015-463279966", 
+"ID-2015-463279966", "ID-2015-471155801", "ID-2015-472085945", 
+"ID-2015-472085945", "ID-2015-472085945", "ID-2015-472085945", 
+"ID-2016-364841262", "ID-2016-421636657", "ID-2016-421636657", 
+"ID-2016-421636657", "ID-2016-421636657", "ID-2016-421636657", 
+"ID-2016-811470948", "ID-2016-811470948", "ID-2016-811470948", 
+"ID-2016-811470948", "ID-2016-812329206", "ID-2016-812329206", 
+"ID-2016-812329206", "ID-2016-812329206", "ID-2017-251350410", 
+"ID-2017-251350410", "ID-2017-251350410", "ID-2017-251350410", 
+"ID-2017-251350410", "ID-2017-821940719", "ID-2017-821940719", 
+"ID-2017-821940719", "ID-2017-821940719"), lon.npo = c(-79.939644, 
+-79.939644, -79.939644, -79.972496, -79.972496, -79.972496, -80.00842, 
+-79.97723, -79.97723, -79.97723, -79.97723, -79.80957, -79.87476, 
+-79.87476, -79.87476, -79.87476, -79.87476, -80.01211, -80.01211, 
+-80.01211, -80.01211, -80.044914, -80.044914, -80.044914, -80.044914, 
+-80.08372, -80.08372, -80.08372, -80.08372, -80.08372, -80.000595, 
+-80.000595, -80.000595, -80.000595), lat.npo = c(40.46608, 40.46608, 
+40.46608, 40.539185, 40.539185, 40.539185, 40.505516, 40.41782, 
+40.41782, 40.41782, 40.41782, 40.342606, 40.457756, 40.457756, 
+40.457756, 40.457756, 40.457756, 40.42181, 40.42181, 40.42181, 
+40.42181, 40.336117, 40.336117, 40.336117, 40.336117, 40.510147, 
+40.510147, 40.510147, 40.510147, 40.510147, 40.448425, 40.448425, 
+40.448425, 40.448425), id.peeps = c("ID-2015-272357477-01", "ID-2015-272357477-03", 
+"ID-2015-272357477-04", "ID-2015-463279966-01", "ID-2015-463279966-02", 
+"ID-2015-463279966-03", "ID-2015-471155801-02", "ID-2015-472085945-01", 
+"ID-2015-472085945-02", "ID-2015-472085945-03", "ID-2015-472085945-04", 
+"ID-2016-364841262-01", "ID-2016-421636657-01", "ID-2016-421636657-02", 
+"ID-2016-421636657-03", "ID-2016-421636657-04", "ID-2016-421636657-05", 
+"ID-2016-811470948-01", "ID-2016-811470948-02", "ID-2016-811470948-03", 
+"ID-2016-811470948-04", "ID-2016-812329206-01", "ID-2016-812329206-02", 
+"ID-2016-812329206-03", "ID-2016-812329206-04", "ID-2017-251350410-01", 
+"ID-2017-251350410-02", "ID-2017-251350410-03", "ID-2017-251350410-04", 
+"ID-2017-251350410-05", "ID-2017-821940719-01", "ID-2017-821940719-02", 
+"ID-2017-821940719-04", "ID-2017-821940719-05"), lon.peeps = c(-79.94033, 
+-79.939644, -79.94033, -79.972496, -79.943695, -80.086655, -80.121445, 
+-79.97723, -79.97723, -79.97723, -79.97723, -79.80957, -79.87476, 
+-80.00684, -79.843285, -79.870735, -79.87476, -80.01211, -80.01211, 
+-80.01211, -80.01211, -80.03822, -80.03563, -80.01831, -80.03428, 
+-80.050766, -80.08372, -80.033844, -80.05077, -80.05808, -80.017334, 
+-79.960304, -79.89812, -79.91075), lat.peeps = c(40.466927, 40.46608, 
+40.466927, 40.539185, 40.632324, 40.617886, 40.53121, 40.41782, 
+40.41782, 40.41782, 40.41782, 40.342606, 40.457756, 40.41485, 
+40.516678, 40.408344, 40.457756, 40.42181, 40.42181, 40.42181, 
+40.42181, 40.322727, 40.30318, 40.335667, 40.332478, 40.52523, 
+40.510147, 40.53659, 40.525955, 40.52417, 40.452763, 40.3647, 
+40.49027, 40.462437), dist.to.npo = c(0.068816677752178, 0, 0.068816677752178, 
+0, 6.61776013349735, 8.09968467940675, 6.20329698324171, 0, 0, 
+0, 0, 0, 0, 7.56057497046757, 4.39920021825653, 3.4244305270775, 
+0, 0, 0, 0, 0, 0.99118026020203, 2.33029798875546, 1.40307671291513, 
+0.614613198811747, 2.02268689449004, 0, 3.19731608226913, 2.04881834879685, 
+1.6609282543407, 0.930777520722411, 6.16790416094753, 6.12014246495763, 
+4.82709929229684), min.y.peeps = c(40.46608, 40.46608, 40.46608, 
+40.539185, 40.539185, 40.539185, 40.53121, 40.41782, 40.41782, 
+40.41782, 40.41782, 40.342606, 40.408344, 40.408344, 40.408344, 
+40.408344, 40.408344, 40.42181, 40.42181, 40.42181, 40.42181, 
+40.30318, 40.30318, 40.30318, 40.30318, 40.510147, 40.510147, 
+40.510147, 40.510147, 40.510147, 40.3647, 40.3647, 40.3647, 40.3647
+), max.y.peeps = c(40.466927, 40.466927, 40.466927, 40.632324, 
+40.632324, 40.632324, 40.53121, 40.41782, 40.41782, 40.41782, 
+40.41782, 40.342606, 40.516678, 40.516678, 40.516678, 40.516678, 
+40.516678, 40.42181, 40.42181, 40.42181, 40.42181, 40.335667, 
+40.335667, 40.335667, 40.335667, 40.53659, 40.53659, 40.53659, 
+40.53659, 40.53659, 40.49027, 40.49027, 40.49027, 40.49027), 
+    min.x.peeps = c(-79.94033, -79.94033, -79.94033, -80.086655, 
+    -80.086655, -80.086655, -80.121445, -79.97723, -79.97723, 
+    -79.97723, -79.97723, -79.80957, -80.00684, -80.00684, -80.00684, 
+    -80.00684, -80.00684, -80.01211, -80.01211, -80.01211, -80.01211, 
+    -80.03822, -80.03822, -80.03822, -80.03822, -80.08372, -80.08372, 
+    -80.08372, -80.08372, -80.08372, -80.017334, -80.017334, 
+    -80.017334, -80.017334), max.x.peeps = c(-79.939644, -79.939644, 
+    -79.939644, -79.943695, -79.943695, -79.943695, -80.121445, 
+    -79.97723, -79.97723, -79.97723, -79.97723, -79.80957, -79.843285, 
+    -79.843285, -79.843285, -79.843285, -79.843285, -80.01211, 
+    -80.01211, -80.01211, -80.01211, -80.01831, -80.01831, -80.01831, 
+    -80.01831, -80.033844, -80.033844, -80.033844, -80.033844, 
+    -80.033844, -79.89812, -79.89812, -79.89812, -79.89812), 
+    LOCAL = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, 
+    TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, 
+    TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, 
+    TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)), row.names = c(NA, -34L
+), class = c("tbl_df", "tbl", "data.frame"))
+```
+
+
+
+
+```{r, eval=F}
+# library("dplyr")
+#  
+#  Attaching package: 'dplyr'
+#  The following objects are masked from 'package:stats':
+#  
+#      filter, lag
+#  The following objects are masked from 'package:base':
+#  
+#      intersect, setdiff, setequal, union
+library("forcats")
+library( ggmap )
+
+# define helper
+`%notin%` <- function(lhs, rhs) !(lhs %in% rhs)
+
+# reduce crime to violent crimes in downtown houston
+violent_crimes <- crime %>% 
+  filter(
+    offense %notin% c("auto theft", "theft", "burglary"),
+    -95.39681 <= lon & lon <= -95.34188,
+     29.73631 <= lat & lat <=  29.78400
+  ) %>% 
+  mutate(
+    offense = fct_drop(offense),
+    offense = fct_relevel(offense, c("robbery", "aggravated assault", "rape", "murder"))
+  )
+
+# use qmplot to make a scatterplot on a map
+qmplot(lon, lat, data = violent_crimes, maptype = "toner-lite", color = I("red"))
+#  Using zoom = 14...
+#  Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL.
+```
+
+
+
+
+
+
+
+# Extra code
+
+```{r, eval=F}
+library( sp )
+spDistsN1()
+```
+
+
+
+
+
+```{r}
+lat1  <- peeps$lat[1]
+long1 <- peeps$lon[1]
+lat2  <- peeps$lat[2]
+long2 <- peeps$lon[2]
+
+earth.dist( long1, lat1, long2, lat2 )
+```
+
+
+
+
+
